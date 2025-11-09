@@ -1,5 +1,5 @@
 """
-AI-Enhanced Video Analysis with Gradio WebRTC
+AI-Enhanced Video Analysis with Gradio Live Video
 Features: Real-time YOLO detection, GPT queries, Vector DB storage
 Optimized for Hugging Face Spaces deployment
 """
@@ -13,6 +13,13 @@ from datetime import datetime
 import json
 import os
 from threading import Lock
+
+# Ensure Ultralytics writes settings/cache inside the project workspace
+ULTRALYTICS_BASE = os.path.join(os.path.dirname(__file__), ".ultralytics")
+os.environ.setdefault("ULTRALYTICS_SETTINGS_DIR", ULTRALYTICS_BASE)
+os.environ.setdefault("ULTRALYTICS_CACHE_DIR", os.path.join(ULTRALYTICS_BASE, "cache"))
+os.makedirs(os.environ["ULTRALYTICS_SETTINGS_DIR"], exist_ok=True)
+os.makedirs(os.environ["ULTRALYTICS_CACHE_DIR"], exist_ok=True)
 
 # AI & Vector DB imports
 from openai import OpenAI
@@ -39,6 +46,8 @@ class VideoAnalysisState:
         self.chroma_client = None
         self.video_collection = None
         self.model = None
+        self.frames_processed = 0
+        self.frames_processed = 0
 
     def init_openai(self, api_key):
         """Initialize OpenAI client"""
@@ -119,12 +128,18 @@ def get_dominant_color(image_region):
 
 def process_frame(frame):
     """Process video frame with YOLO detection"""
-    if frame is None or state.model is None:
-        return frame
+    if frame is None:
+        return gr.update(value=None, visible=False)
+
+    if state.model is None:
+        return gr.update(value=frame, visible=True)
+
+    # Convert incoming RGB frame to BGR for OpenCV/YOLO processing
+    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
     try:
         # Run YOLO detection
-        results = state.model(frame, conf=0.4, verbose=False)
+        results = state.model(frame_bgr, conf=0.4, verbose=False)
 
         detected_objects = []
         events_text = []
@@ -140,7 +155,7 @@ def process_frame(frame):
 
                     # Get color
                     try:
-                        roi = frame[y1:y2, x1:x2]
+                        roi = frame_bgr[y1:y2, x1:x2]
                         color = get_dominant_color(roi)
                     except:
                         color = "unknown"
@@ -155,16 +170,17 @@ def process_frame(frame):
                     events_text.append(f"{color} {label}")
 
                     # Draw bounding box
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
                     # Draw label
                     text = f"{color} {label} {conf:.2f}"
-                    cv2.putText(frame, text, (x1, y1-10),
+                    cv2.putText(frame_bgr, text, (x1, y1-10),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         # Update state (thread-safe)
         with state.lock:
             state.detected_objects = detected_objects
+            state.frames_processed += 1
 
             # Create chunks every 30 frames
             if state.chunk_id % 30 == 0 and events_text:
@@ -188,14 +204,16 @@ def process_frame(frame):
             chunk_count = len(state.frame_chunks)
 
         # Add stats overlay
-        cv2.putText(frame, f"Objects: {len(detected_objects)} | Chunks: {chunk_count}",
+        cv2.putText(frame_bgr, f"Objects: {len(detected_objects)} | Chunks: {chunk_count}",
                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        return frame
+        # Convert back to RGB for display in Gradio
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        return gr.update(value=frame_rgb, visible=True)
 
     except Exception as e:
         state.event_log.append(f"❌ Frame error: {str(e)[:50]}")
-        return frame
+        return gr.update(value=frame, visible=True)
 
 def get_embedding(text):
     """Get embeddings from OpenAI"""
@@ -276,12 +294,19 @@ def query_with_ai(question):
         # Get current state
         with state.lock:
             current_objects = state.detected_objects.copy()
+            frames_seen = state.frames_processed
 
         if current_objects:
             obj_descriptions = [f"{o['color']} {o['label']}" for o in current_objects]
             current_state = f"Currently visible: {', '.join(obj_descriptions)}"
         else:
-            current_state = "No objects currently visible"
+            if frames_seen > 0:
+                current_state = "Video stream active but no objects detected in the latest frame."
+            else:
+                current_state = "No video frames processed yet."
+
+        if not context_docs and frames_seen > 0:
+            context = "Video stream active, waiting for notable detections to log."
 
         # Create prompt
         prompt = f"""You are a video analysis assistant. Answer the question based on the video footage context.
@@ -414,15 +439,26 @@ with gr.Blocks(title="AI Video Analysis", theme=gr.themes.Soft()) as demo:
 
             api_status = gr.Markdown("⚠️ Enter your OpenAI API key to enable AI features")
 
-            # WebRTC Video Stream
+            # Live Video Stream
             if YOLO_AVAILABLE:
-                webcam = gr.WebRTC(
-                    label="Webcam",
-                    mode="send-receive",
-                    modality="video",
-                    fn=process_frame
+                processed_feed = gr.Image(
+                    label="YOLO Detection Feed",
+                    interactive=False,
+                    type="numpy",
+                    visible=False
                 )
-                gr.Markdown("📹 Click the webcam button to start. Video frames are chunked every ~1 second!")
+                webcam_stream = gr.Image(
+                    label="Webcam Stream",
+                    sources=["webcam"],
+                    streaming=True,
+                    type="numpy"
+                )
+                webcam_stream.stream(
+                    fn=process_frame,
+                    inputs=webcam_stream,
+                    outputs=processed_feed
+                )
+                gr.Markdown("📹 Start the webcam to reveal the YOLO view above. Detections update in real-time and frames are chunked every ~1 second!")
             else:
                 gr.Markdown("❌ YOLO not available. Install with: `pip install ultralytics`")
 
@@ -433,11 +469,11 @@ with gr.Blocks(title="AI Video Analysis", theme=gr.themes.Soft()) as demo:
 
                 1. **Allow camera permissions** in your browser
                 2. **Use HTTPS** - Hugging Face Spaces provides this automatically
-                3. **Try Chrome/Edge** - Best WebRTC support
+                3. **Try Chrome/Edge** - Best webcam streaming support
                 4. **Wait 30-60 seconds** on first load for YOLO model download
                 5. **Check browser console** for errors (F12)
 
-                This app uses Cloudflare TURN servers (free tier) for reliable connectivity.
+                Live streaming uses browser-based webcam APIs; ensure camera access is allowed.
                 """)
 
         # Right column - AI Query and Stats
@@ -455,24 +491,33 @@ with gr.Blocks(title="AI Video Analysis", theme=gr.themes.Soft()) as demo:
             gr.Markdown("---")
 
             # Stats
-            stats_display = gr.Markdown(get_stats())
+            stats_display = gr.Markdown(value=get_stats, every=10)
             refresh_btn = gr.Button("🔄 Refresh Stats", size="sm")
 
             gr.Markdown("---")
 
             # Current detections
-            detections_display = gr.Markdown(get_current_detections())
+            detections_display = gr.Markdown(
+                value=get_current_detections,
+                every=10
+            )
 
             gr.Markdown("---")
 
             # Recent chunks
-            chunks_display = gr.Markdown(get_recent_chunks())
+            chunks_display = gr.Markdown(
+                value=get_recent_chunks,
+                every=10
+            )
 
             gr.Markdown("---")
 
             # Event log
             gr.Markdown("### 📝 Event Log")
-            log_display = gr.Markdown(get_event_log())
+            log_display = gr.Markdown(
+                value=get_event_log,
+                every=10
+            )
 
     # How it works
     with gr.Accordion("ℹ️ How This Works", open=False):
@@ -499,7 +544,7 @@ with gr.Blocks(title="AI Video Analysis", theme=gr.themes.Soft()) as demo:
 
         ### 🔧 Tech Stack:
         - **YOLOv8**: Real-time object detection
-        - **Gradio WebRTC**: Smooth video streaming with FastRTC
+        - **Gradio Live Video**: Smooth webcam streaming
         - **OpenAI GPT**: Natural language understanding
         - **ChromaDB**: Vector similarity search
         - **Hugging Face Spaces**: Free deployment with TURN servers
