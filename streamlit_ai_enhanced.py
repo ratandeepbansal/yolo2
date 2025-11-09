@@ -411,11 +411,12 @@ with col1:
     if not st.session_state.openai_api_key:
         st.warning("⚠️ Enter your OpenAI API key in the sidebar to enable AI features!")
 
-    # WebRTC streamer with TURN servers for better connectivity
+    # WebRTC streamer with multiple TURN servers for better connectivity
     RTC_CONFIGURATION = RTCConfiguration(
         {
             "iceServers": [
                 {"urls": ["stun:stun.l.google.com:19302"]},
+                {"urls": ["stun:stun1.l.google.com:19302"]},
                 {
                     "urls": ["turn:openrelay.metered.ca:80"],
                     "username": "openrelayproject",
@@ -426,7 +427,13 @@ with col1:
                     "username": "openrelayproject",
                     "credential": "openrelayproject",
                 },
-            ]
+                {
+                    "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
+                    "username": "openrelayproject",
+                    "credential": "openrelayproject",
+                },
+            ],
+            "iceTransportPolicy": "all",
         }
     )
 
@@ -440,6 +447,21 @@ with col1:
     )
 
     st.info("📹 Click 'START' to begin. Video frames are chunked every ~1 second and stored in the vector database!")
+
+    # Connection troubleshooting
+    with st.expander("⚠️ WebRTC Connection Troubleshooting"):
+        st.markdown("""
+        **If you see "Connection is taking longer than expected":**
+
+        1. **Allow camera permissions** in your browser when prompted
+        2. **Use HTTPS** - WebRTC requires secure connection (Streamlit Cloud provides this)
+        3. **Try a different browser** - Chrome/Edge work best for WebRTC
+        4. **Check firewall** - Make sure ports 80, 443 are not blocked
+        5. **Wait 30-60 seconds** on first load for YOLO model download
+        6. **Refresh the page** if connection fails
+
+        The app uses TURN servers for NAT traversal, but some corporate networks may block WebRTC.
+        """)
 
 with col2:
     st.header("🤖 AI Query Interface")
