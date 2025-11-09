@@ -1,0 +1,12 @@
+[server]
+# Prevent frequent reruns
+runOnSave = false
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# Reduce connection timeouts
+showErrorDetails = true
+toolbarMode = "minimal"

@@ -411,9 +411,23 @@ with col1:
     if not st.session_state.openai_api_key:
         st.warning("⚠️ Enter your OpenAI API key in the sidebar to enable AI features!")
 
-    # WebRTC streamer
+    # WebRTC streamer with TURN servers for better connectivity
     RTC_CONFIGURATION = RTCConfiguration(
-        {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+        {
+            "iceServers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {
+                    "urls": ["turn:openrelay.metered.ca:80"],
+                    "username": "openrelayproject",
+                    "credential": "openrelayproject",
+                },
+                {
+                    "urls": ["turn:openrelay.metered.ca:443"],
+                    "username": "openrelayproject",
+                    "credential": "openrelayproject",
+                },
+            ]
+        }
     )
 
     webrtc_ctx = webrtc_streamer(
