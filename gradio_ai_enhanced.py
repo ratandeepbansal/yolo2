@@ -416,25 +416,55 @@ def query_with_ai(question):
 
         context = "\n".join(context_docs) if context_docs else "No video events stored yet."
 
-        # Get current state
+        # Get current state with tracking information
         with state.lock:
             current_objects = state.detected_objects.copy()
             frames_seen = state.frames_processed
+            total_unique_tracks = len(state.unique_tracks)
+            active_tracks_count = len(state.active_tracks)
+            track_classes_summary = {}
+            for track_id, class_name in state.track_classes.items():
+                track_classes_summary[class_name] = track_classes_summary.get(class_name, 0) + 1
 
+        # Build current state description with tracking info
         if current_objects:
-            obj_descriptions = [f"{o['color']} {o['label']}" for o in current_objects]
-            current_state = f"Currently visible: {', '.join(obj_descriptions)}"
+            obj_descriptions = []
+            for o in current_objects:
+                if o.get('track_id') is not None:
+                    obj_descriptions.append(f"Track#{o['track_id']} ({o['color']} {o['label']})")
+                else:
+                    obj_descriptions.append(f"{o['color']} {o['label']}")
+
+            current_state = f"Currently visible: {', '.join(obj_descriptions)}\n"
+            current_state += f"Active tracks: {active_tracks_count}, Total unique tracks seen: {total_unique_tracks}"
         else:
             if frames_seen > 0:
-                current_state = "Video stream active but no objects detected in the latest frame."
+                current_state = f"Video stream active but no objects detected in the latest frame.\nTotal unique tracks seen: {total_unique_tracks}"
             else:
                 current_state = "No video frames processed yet."
+
+        # Add tracking statistics
+        tracking_summary = f"\nTracking Statistics:\n"
+        tracking_summary += f"- Total unique objects tracked: {total_unique_tracks}\n"
+        tracking_summary += f"- Currently active: {active_tracks_count}\n"
+        if track_classes_summary:
+            tracking_summary += "- Unique objects by class: " + ", ".join([f"{count} {cls}" for cls, count in track_classes_summary.items()])
+        else:
+            tracking_summary += "- No objects tracked yet"
+
+        current_state += tracking_summary
 
         if not context_docs and frames_seen > 0:
             context = "Video stream active, waiting for notable detections to log."
 
         # Create prompt
-        prompt = f"""You are a video analysis assistant. Answer the question based on the video footage context.
+        prompt = f"""You are a video analysis assistant with object tracking capabilities. Answer the question based on the video footage context.
+
+IMPORTANT: The system uses persistent object tracking, which means each detected object has a unique Track ID that persists across frames. This allows you to:
+- Count UNIQUE objects (not just current detections)
+- Identify when the SAME object appears multiple times
+- Track how long objects remain visible
+- Distinguish between different instances of the same object class
 
 Video Event History (from vector database):
 {context}
@@ -444,7 +474,7 @@ Current Frame:
 
 Question: {question}
 
-Provide a concise, helpful answer based on the video data."""
+Provide a concise, helpful answer based on the video data. When answering questions about "how many" objects, use the unique track counts, not just current detections. When asked if an object appeared, check both current state and historical tracking data."""
 
         # Call GPT
         response = state.openai_client.chat.completions.create(
