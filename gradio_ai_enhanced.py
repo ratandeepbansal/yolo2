@@ -278,20 +278,40 @@ def process_frame(frame):
 
             # Create chunks every 30 frames
             if state.chunk_id % 30 == 0 and events_text:
-                chunk_description = f"At {datetime.now().strftime('%H:%M:%S')}: Detected {', '.join(events_text)}"
+                # Build enhanced chunk description with tracking info
+                unique_track_count = len(current_frame_tracks)
+                total_unique_count = len(state.unique_tracks)
+
+                # Build detailed tracking description
+                track_details = []
+                for obj in detected_objects:
+                    if obj.get('track_id') is not None:
+                        track_id = obj['track_id']
+                        duration = state.track_lifetimes.get(track_id, {}).get('duration', 0)
+                        track_details.append(
+                            f"Track#{track_id} ({obj['color']} {obj['label']}, seen for {duration:.1f}s)"
+                        )
+
+                chunk_description = f"At {datetime.now().strftime('%H:%M:%S')}: "
+                chunk_description += f"{unique_track_count} active objects, {total_unique_count} unique tracks total. "
+                chunk_description += f"Details: {', '.join(track_details) if track_details else 'No tracked objects'}"
 
                 state.frame_chunks.append({
                     'id': state.chunk_id,
                     'timestamp': time.time(),
                     'description': chunk_description,
-                    'objects': detected_objects.copy()
+                    'objects': detected_objects.copy(),
+                    'active_tracks': list(current_frame_tracks),
+                    'unique_tracks_count': total_unique_count
                 })
 
                 state.pending_chunks.append({
                     'id': state.chunk_id,
                     'description': chunk_description,
                     'timestamp': time.time(),
-                    'object_count': len(detected_objects)
+                    'object_count': len(detected_objects),
+                    'active_tracks': list(current_frame_tracks),
+                    'unique_tracks_total': total_unique_count
                 })
 
             state.chunk_id += 1
@@ -335,14 +355,25 @@ def process_pending_chunks():
         try:
             embedding = get_embedding(chunk['description'])
             if embedding:
+                # Build metadata with tracking information
+                metadata = {
+                    'timestamp': chunk['timestamp'],
+                    'object_count': chunk['object_count']
+                }
+
+                # Add tracking metadata if available
+                if 'active_tracks' in chunk:
+                    metadata['active_tracks'] = ','.join(map(str, chunk['active_tracks']))
+                    metadata['active_track_count'] = len(chunk['active_tracks'])
+
+                if 'unique_tracks_total' in chunk:
+                    metadata['unique_tracks_total'] = chunk['unique_tracks_total']
+
                 state.video_collection.add(
                     documents=[chunk['description']],
                     embeddings=[embedding],
                     ids=[f"chunk_{chunk['id']}"],
-                    metadatas=[{
-                        'timestamp': chunk['timestamp'],
-                        'object_count': chunk['object_count']
-                    }]
+                    metadatas=[metadata]
                 )
                 with state.lock:
                     state.pending_chunks.remove(chunk)
