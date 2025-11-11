@@ -515,6 +515,8 @@ def get_stats():
         chunks = len(state.frame_chunks)
         objects = len(state.detected_objects)
         pending = len(state.pending_chunks)
+        unique_tracks = len(state.unique_tracks)
+        active_tracks = len(state.active_tracks)
 
     vector_count = 0
     if state.video_collection:
@@ -528,6 +530,8 @@ def get_stats():
 - Current Objects: {objects}
 - Pending Embeddings: {pending}
 - Vector DB Entries: {vector_count}
+- **Unique Tracks (Total): {unique_tracks}**
+- **Active Tracks (Now): {active_tracks}**
 """
     return stats
 
@@ -541,7 +545,8 @@ def get_current_detections():
 
     output = "**Current Detections:**\n\n"
     for i, obj in enumerate(current):
-        output += f"{i+1}. {obj['color']} {obj['label']} ({obj['confidence']:.2f})\n"
+        track_info = f" [Track #{obj['track_id']}]" if obj.get('track_id') is not None else ""
+        output += f"{i+1}. {obj['color']} {obj['label']} ({obj['confidence']:.2f}){track_info}\n"
 
     return output
 
@@ -568,6 +573,42 @@ def get_event_log():
         return "No events yet"
 
     return "\n".join(events)
+
+def get_tracking_stats():
+    """Get detailed tracking statistics"""
+    with state.lock:
+        unique_count = len(state.unique_tracks)
+        active_count = len(state.active_tracks)
+        track_classes = state.track_classes.copy()
+        track_lifetimes = state.track_lifetimes.copy()
+
+    if unique_count == 0:
+        return "**Tracking Statistics:**\n\nNo objects tracked yet - start the video!"
+
+    # Build class summary
+    class_counts = {}
+    for track_id, class_name in track_classes.items():
+        class_counts[class_name] = class_counts.get(class_name, 0) + 1
+
+    output = "**Tracking Statistics:**\n\n"
+    output += f"**Total Unique Objects:** {unique_count}\n"
+    output += f"**Currently Active:** {active_count}\n\n"
+
+    if class_counts:
+        output += "**Unique Objects by Class:**\n"
+        for class_name, count in sorted(class_counts.items(), key=lambda x: x[1], reverse=True):
+            output += f"- {class_name}: {count}\n"
+
+    # Show longest tracked objects
+    if track_lifetimes:
+        sorted_tracks = sorted(track_lifetimes.items(), key=lambda x: x[1]['duration'], reverse=True)[:5]
+        output += f"\n**Longest Tracked (Top 5):**\n"
+        for track_id, lifetime in sorted_tracks:
+            class_name = track_classes.get(track_id, "unknown")
+            duration = lifetime['duration']
+            output += f"- Track #{track_id} ({class_name}): {duration:.1f}s\n"
+
+    return output
 
 # Initialize YOLO on startup
 state.init_yolo()
@@ -651,6 +692,15 @@ with gr.Blocks(title="AI Video Analysis", theme=gr.themes.Soft()) as demo:
 
             gr.Markdown("---")
 
+            # Tracking statistics (NEW)
+            gr.Markdown("### 🎯 Object Tracking")
+            tracking_stats_display = gr.Markdown(
+                value=get_tracking_stats,
+                every=10
+            )
+
+            gr.Markdown("---")
+
             # Current detections
             detections_display = gr.Markdown(
                 value=get_current_detections,
@@ -679,29 +729,41 @@ with gr.Blocks(title="AI Video Analysis", theme=gr.themes.Soft()) as demo:
         gr.Markdown("""
         ### 🎯 Features:
 
-        **1. Real-time Object Detection:**
+        **1. Real-time Object Detection with Tracking:**
         - YOLOv8 detects objects in your webcam feed
+        - ByteTrack algorithm for persistent object tracking
+        - Unique Track IDs maintain object identity across frames
         - Color detection identifies object colors
-        - Bounding boxes drawn in real-time
+        - Bounding boxes drawn in real-time with Track IDs
 
-        **2. Frame Chunking:**
+        **2. Persistent Object Tracking:**
+        - Each detected object gets a unique Track ID
+        - Track objects even when they leave and return to frame
+        - Count unique objects (not just current detections)
+        - Measure object dwell time and trajectories
+        - Distinguish between different instances of same object class
+
+        **3. Frame Chunking:**
         - Video frames grouped into 1-second chunks (30 frames)
         - Chunks stored in memory (last 100) and vector database
+        - Tracking metadata included in each chunk
 
-        **3. Vector Database (ChromaDB):**
-        - Semantic embeddings of video events
+        **4. Vector Database (ChromaDB):**
+        - Semantic embeddings of video events with tracking data
         - Similarity search across video history
+        - Track-aware metadata for advanced queries
 
-        **4. OpenAI Integration:**
+        **5. OpenAI Integration:**
         - GPT-4o-mini for intelligent query answering
         - text-embedding-3-small for semantic search
-        - Context-aware responses based on video history
+        - Context-aware responses based on video history and tracking data
+        - Answer questions like "How many unique people appeared?"
 
         ### 🔧 Tech Stack:
-        - **YOLOv8**: Real-time object detection
+        - **YOLOv8 + ByteTrack**: Real-time object detection with persistent tracking
         - **Gradio Live Video**: Smooth webcam streaming
-        - **OpenAI GPT**: Natural language understanding
-        - **ChromaDB**: Vector similarity search
+        - **OpenAI GPT-4o-mini**: Natural language understanding
+        - **ChromaDB**: Vector similarity search with tracking metadata
         - **Hugging Face Spaces**: Free deployment with TURN servers
 
         ### 💰 Costs:
@@ -724,8 +786,8 @@ with gr.Blocks(title="AI Video Analysis", theme=gr.themes.Soft()) as demo:
     )
 
     refresh_btn.click(
-        fn=lambda: [get_stats(), get_current_detections(), get_recent_chunks(), get_event_log()],
-        outputs=[stats_display, detections_display, chunks_display, log_display]
+        fn=lambda: [get_stats(), get_tracking_stats(), get_current_detections(), get_recent_chunks(), get_event_log()],
+        outputs=[stats_display, tracking_stats_display, detections_display, chunks_display, log_display]
     )
 
 # Launch the app
