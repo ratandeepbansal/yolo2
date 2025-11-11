@@ -47,7 +47,15 @@ class VideoAnalysisState:
         self.video_collection = None
         self.model = None
         self.frames_processed = 0
-        self.frames_processed = 0
+
+        # Object tracking data structures
+        self.track_history = {}  # track_id -> {trajectory, first_seen, last_seen, class, color, etc.}
+        self.unique_tracks = set()  # Set of all unique track IDs ever seen
+        self.active_tracks = set()  # Currently visible track IDs
+        self.track_lifetimes = {}  # track_id -> {first_seen, last_seen, duration}
+        self.movement_data = {}  # track_id -> deque of positions for velocity calculation
+        self.track_classes = {}  # track_id -> object class name
+        self.track_colors = {}  # track_id -> dominant color
 
     def init_openai(self, api_key):
         """Initialize OpenAI client"""
@@ -138,15 +146,62 @@ def process_frame(frame):
     frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
     try:
-        # Run YOLO detection
-        results = state.model(frame_bgr, conf=0.4, verbose=False)
+        # Run YOLO tracking (ByteTrack algorithm)
+        results = state.model.track(
+            frame_bgr,
+            conf=0.4,
+            verbose=False,
+            persist=True,  # Persist tracks between frames
+            tracker="bytetrack.yaml"  # Use ByteTrack algorithm
+        )
 
         detected_objects = []
         events_text = []
+        current_frame_tracks = set()
 
         for r in results:
             boxes = r.boxes
-            if boxes is not None:
+            if boxes is not None and boxes.id is not None:
+                # Tracking is active
+                for box in boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                    conf = box.conf[0].item()
+                    cls = int(box.cls[0].item())
+                    label = state.model.names[cls]
+                    track_id = int(box.id[0].item())  # Extract track ID
+
+                    # Get color
+                    try:
+                        roi = frame_bgr[y1:y2, x1:x2]
+                        color = get_dominant_color(roi)
+                    except:
+                        color = "unknown"
+
+                    # Calculate center position
+                    center_x = (x1 + x2) // 2
+                    center_y = (y1 + y2) // 2
+
+                    detected_objects.append({
+                        'label': label,
+                        'color': color,
+                        'confidence': conf,
+                        'bbox': (x1, y1, x2, y2),
+                        'track_id': track_id,
+                        'center': (center_x, center_y)
+                    })
+
+                    current_frame_tracks.add(track_id)
+                    events_text.append(f"{color} {label} (ID:{track_id})")
+
+                    # Draw bounding box
+                    cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                    # Draw label with track ID
+                    text = f"ID:{track_id} {color} {label} {conf:.2f}"
+                    cv2.putText(frame_bgr, text, (x1, y1-10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            elif boxes is not None:
+                # Fallback: tracking not available, use regular detection
                 for box in boxes:
                     x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                     conf = box.conf[0].item()
@@ -164,7 +219,8 @@ def process_frame(frame):
                         'label': label,
                         'color': color,
                         'confidence': conf,
-                        'bbox': (x1, y1, x2, y2)
+                        'bbox': (x1, y1, x2, y2),
+                        'track_id': None
                     })
 
                     events_text.append(f"{color} {label}")
@@ -181,6 +237,44 @@ def process_frame(frame):
         with state.lock:
             state.detected_objects = detected_objects
             state.frames_processed += 1
+            current_time = time.time()
+
+            # Update tracking data structures
+            for obj in detected_objects:
+                if obj.get('track_id') is not None:
+                    track_id = obj['track_id']
+
+                    # Track this ID as seen
+                    state.unique_tracks.add(track_id)
+
+                    # Initialize tracking data if new track
+                    if track_id not in state.track_history:
+                        state.track_history[track_id] = {
+                            'first_seen': current_time,
+                            'last_seen': current_time,
+                            'trajectory': deque(maxlen=30),  # Last 30 positions
+                            'class': obj['label'],
+                            'color': obj['color']
+                        }
+                        state.track_classes[track_id] = obj['label']
+                        state.track_colors[track_id] = obj['color']
+                        state.movement_data[track_id] = deque(maxlen=30)
+
+                    # Update tracking data
+                    state.track_history[track_id]['last_seen'] = current_time
+                    state.track_history[track_id]['trajectory'].append(obj['center'])
+                    state.movement_data[track_id].append(obj['center'])
+
+                    # Update lifetime
+                    duration = current_time - state.track_history[track_id]['first_seen']
+                    state.track_lifetimes[track_id] = {
+                        'first_seen': state.track_history[track_id]['first_seen'],
+                        'last_seen': current_time,
+                        'duration': duration
+                    }
+
+            # Update active tracks
+            state.active_tracks = current_frame_tracks.copy()
 
             # Create chunks every 30 frames
             if state.chunk_id % 30 == 0 and events_text:
